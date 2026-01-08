@@ -219,20 +219,18 @@
 
     <div id="canvas-container"></div>
 
-    <script>
+   <script>
         // ================= 配置 =================
         const CONFIG = { baseParticleCount: 350000 };
         let STATE = {
             isGestureMode: false,
             sensitivity: 1.0,
-            manualScale: 2.13, // 默认缩放设为 2.13
+            manualScale: 2.13,
             manualRotX: -0.10,
-            ringSpeed: 0.05
+            ringSpeed: 0.1
         };
 
         // ================= SHADERS =================
-        
-        // 1. 土星 (粒子)
         const SATURN_VS = `
             attribute float size; attribute vec3 customColor; attribute float opacityAttr;
             attribute float orbitSpeed; attribute float isRing; attribute float aRandomId;
@@ -273,12 +271,8 @@
                 gl_FragColor = vec4(col * brightFactor, shape * vOpacity * (0.2 + 0.5 * t));
             }
         `;
-
-        // 2. 星星
         const STAR_VS = `attribute float s; attribute vec3 c; varying vec3 vC; void main(){vC=c; vec4 p=modelViewMatrix*vec4(position,1.); gl_PointSize=s*(600./-p.z); gl_Position=projectionMatrix*p;}`;
         const STAR_FS = `varying vec3 vC; void main(){vec2 p=2.*gl_PointCoord-1.; float a=exp(-dot(p,p)*4.); gl_FragColor=vec4(vC,a*0.8);}`;
-
-        // 3. 通用行星顶点
         const PLANET_VS = `
             varying vec2 vUv; varying vec3 vNormal; varying vec3 vViewPosition;
             void main() {
@@ -287,8 +281,6 @@
                 vViewPosition = -mvPosition.xyz; gl_Position = projectionMatrix * mvPosition;
             }
         `;
-
-        // 4. 地球 (Earth)
         const EARTH_FS = `
             uniform float uTime; varying vec2 vUv; varying vec3 vNormal; varying vec3 vViewPosition;
             float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
@@ -317,8 +309,6 @@
                 gl_FragColor = vec4(baseColor * diff + atmosphere, 1.0);
             }
         `;
-
-        // 5. 火星 (Mars)
         const MARS_FS = `
             uniform float uTime; varying vec2 vUv; varying vec3 vNormal; varying vec3 vViewPosition;
             float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
@@ -352,6 +342,8 @@
         let targetRotX = STATE.manualRotX;
         let isHandDetected = false;
         let stats = { frameCount: 0, lastCheck: 0 };
+        // 定义为全局变量
+        let cameraUtils;
 
         function init() {
             const container = document.getElementById('canvas-container');
@@ -369,6 +361,9 @@
             buildPlanets();
             setupControls();
             updateControlState();
+
+            // 初始化摄像头工具，但不启动 (no .start() here)
+            initCamera();
 
             requestAnimationFrame(gameLoop);
             window.addEventListener('resize', () => {
@@ -443,7 +438,7 @@
         function buildPlanets() {
             planetGroup = new THREE.Group();
             
-            // 1. 火星
+            // 火星
             const marsGeo = new THREE.SphereGeometry(10, 64, 64);
             const marsMat = new THREE.ShaderMaterial({
                 uniforms:{ },
@@ -453,7 +448,7 @@
             mars.position.set(-300, 100, -450);
             planetGroup.add(mars);
 
-            // 2. 地球
+            // 地球
             const earthGeo = new THREE.SphereGeometry(14, 64, 64);
             earthUniforms = { uTime: { value: 0 } };
             const earthMat = new THREE.ShaderMaterial({
@@ -501,10 +496,31 @@
 
         function setupControls() {
             const chk = document.getElementById('chk-gesture');
-            chk.checked = false;
+            chk.checked = false; // 确保初始是关闭的
+            
+            // 【关键修改】在此处处理摄像头启动和错误静默
             chk.addEventListener('change', (e) => {
                 STATE.isGestureMode = e.target.checked;
                 updateControlState();
+
+                if (STATE.isGestureMode) {
+                    // 只有开启开关时，才尝试启动摄像头
+                    if (cameraUtils) {
+                        cameraUtils.start().catch(err => {
+                            // 错误捕获：静默处理，不弹窗
+                            console.log("摄像头启动失败 (已忽略):", err);
+                            // 如果失败，可选：自动关掉开关，或保持开启等待用户检查
+                            // STATE.isGestureMode = false;
+                            // chk.checked = false;
+                            // updateControlState();
+                        });
+                    }
+                } else {
+                    // 关闭开关时，停止摄像头
+                    if (cameraUtils) {
+                        try { cameraUtils.stop(); } catch(e){}
+                    }
+                }
             });
 
             const inpMScale = document.getElementById('inp-m-scale');
@@ -585,35 +601,37 @@
         }
 
         // ================= AI =================
-        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
-        hands.setOptions({maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5});
-        
-        hands.onResults(results => {
-            if (STATE.isGestureMode && results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-                isHandDetected = true;
-                const h = results.multiHandLandmarks[0];
-                const d = Math.sqrt(Math.pow(h[4].x-h[8].x, 2) + Math.pow(h[4].y-h[8].y, 2));
-                const normD = Math.max(0, Math.min(1, (d - 0.02) / 0.25));
-                targetScale = 0.2 + normD * (3.0 * STATE.sensitivity);
-                const y = h[9].y;
-                const normY = Math.max(0, Math.min(1, (y - 0.1) / 0.8));
-                targetRotX = -0.6 + normY * (1.6 * STATE.sensitivity);
-            } else {
-                isHandDetected = false;
-            }
-        });
-
-        const videoEl = document.getElementsByClassName('input_video')[0];
-        let skipCounter = 0;
-        const cameraUtils = new Camera(videoEl, {
-            onFrame: async () => {
-                if (STATE.isGestureMode) {
-                    if (skipCounter++ % 3 === 0) await hands.send({image: videoEl});
+        function initCamera() {
+            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            hands.setOptions({maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5});
+            
+            hands.onResults(results => {
+                if (STATE.isGestureMode && results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    isHandDetected = true;
+                    const h = results.multiHandLandmarks[0];
+                    const d = Math.sqrt(Math.pow(h[4].x-h[8].x, 2) + Math.pow(h[4].y-h[8].y, 2));
+                    const normD = Math.max(0, Math.min(1, (d - 0.02) / 0.25));
+                    targetScale = 0.2 + normD * (3.0 * STATE.sensitivity);
+                    const y = h[9].y;
+                    const normY = Math.max(0, Math.min(1, (y - 0.1) / 0.8));
+                    targetRotX = -0.6 + normY * (1.6 * STATE.sensitivity);
+                } else {
+                    isHandDetected = false;
                 }
-            },
-            width: 320, height: 240
-        });
-        cameraUtils.start();
+            });
+
+            const videoEl = document.getElementsByClassName('input_video')[0];
+            let skipCounter = 0;
+            cameraUtils = new Camera(videoEl, {
+                onFrame: async () => {
+                    if (STATE.isGestureMode) {
+                        if (skipCounter++ % 3 === 0) await hands.send({image: videoEl});
+                    }
+                },
+                width: 320, height: 240
+            });
+            // 移除了自动调用 cameraUtils.start()
+        }
 
         function toggleFullScreen() {
             if(!document.fullscreenElement) document.documentElement.requestFullscreen();
